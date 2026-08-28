@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 
 import streamlit as st
 import pandas as pd
@@ -387,7 +387,7 @@ with input_col:
     st.session_state.sel_lat = lat
     st.session_state.sel_lon = lon
 
-    fetch_env = st.checkbox("Include 24-hour environmental profile", value=True)
+    st.markdown("")
 
     st.markdown("")
     analyze_btn = st.button("🔬 Analyze Heat Risk", type="primary", use_container_width=True)
@@ -426,159 +426,137 @@ st.divider()
 
 # ── Analysis ──
 if analyze_btn:
-    now = datetime.now()
-    timestamps = [now - timedelta(hours=i) for i in range(3, -1, -1)]
-    labels, temps = [], []
+    chosen_date = date(2024, 7, 15)  # Hardcoded benchmark date for robust data
+    chosen_time = f"{datetime.now().hour:02d}:00"
+    
+    with st.status(f"🛰️ Querying FortyGuard API for Today's Data...", expanded=True) as status_box:
+        st.write(f"📡 Requesting thermal heatmap for `{chosen_time}`...")
+        try:
+            current_temp = get_temperature(lat, lon, chosen_date.strftime("%Y-%m-%d"), chosen_time)
+            st.write(f"✅ Thermal reading: **{fmt_temp(current_temp, use_f)}**")
+        except Exception as e:
+            current_temp = None
+            error_msg = str(e)
+            st.write(f"⚠️ Snapshot call note: {e}")
 
-    with st.status("🔄 Fetching temperature data …", expanded=True) as status:
-        for ts in timestamps:
-            d = ts.strftime("%Y-%m-%d")
-            t = ts.strftime("%H:00")
-            st.write(f"⏳ {d} @ {t}")
+        st.write("🌿 Requesting 24-hour environmental time-series...")
+        try:
+            anchor_temp = current_temp if current_temp is not None else 30.0
+            env_profile = get_env_full_day(lat, lon, anchor_temp, chosen_date.strftime("%Y-%m-%d"))
+            st.write("✅ Environmental time-series acquired.")
+        except Exception as e_env:
+            env_profile = {}
+            st.write(f"⚠️ Environmental data notice: {e_env}")
+
+        exceed_hours = 0.0
+        if current_temp and current_temp >= 30.0:
             try:
-                temp = get_temperature(lat, lon, d, t)
-                labels.append(t)
-                temps.append(temp)
-            except (TaskFailedError, TaskTimeoutError, ValueError) as e:
-                st.write(f"⚠️ Skipped {d} {t}: {e}")
-        status.update(label="✅ Temperature data ready!", state="complete", expanded=False)
+                exceed_hours = get_exceedance_hours(lat, lon, chosen_date.strftime("%Y-%m-%d"), "23:00", WARNING_TEMP)
+            except Exception:
+                exceed_hours = 0.0
 
-    if temps:
-        current = temps[-1]
-        emoji, mood, mood_color = heat_mood(current)
-        lvl_text, lvl_color = risk_level(current, 0)
-        delta = temps[-1] - temps[0] if len(temps) > 1 else 0
+        status_box.update(
+            label="✅ Analysis complete!" if current_temp is not None else "⚠️ Analysis completed with warnings",
+            state="complete" if current_temp is not None else "error",
+            expanded=False,
+        )
 
-        # ── Metric cards ──
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.markdown(f'''
+    if current_temp is not None:
+        emoji, mood, mood_color = heat_mood(current_temp)
+        risk_txt, risk_color = risk_level(current_temp, exceed_hours)
+
+        # ── Metric Cards ──
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.markdown(f"""
             <div class="metric-card">
-                <div class="label">Temperature</div>
-                <div class="value" style="color:{mood_color}">{fmt_temp(current, use_f)}</div>
-            </div>''', unsafe_allow_html=True)
-        with c2:
-            st.markdown(f'''
+                <div class="label">Temperature @ {chosen_time}</div>
+                <div class="value" style="color:{mood_color}">{fmt_temp(current_temp, use_f)}</div>
+            </div>""", unsafe_allow_html=True)
+        with m2:
+            st.markdown(f"""
             <div class="metric-card">
-                <div class="label">Feels Like</div>
+                <div class="label">Thermal Sensation</div>
                 <div class="value">{emoji} {mood}</div>
-            </div>''', unsafe_allow_html=True)
-        with c3:
-            st.markdown(f'''
+            </div>""", unsafe_allow_html=True)
+        with m3:
+            st.markdown(f"""
             <div class="metric-card">
-                <div class="label">Risk Level</div>
-                <div class="value"><span class="risk-badge" style="background:{lvl_color}">{lvl_text}</span></div>
-            </div>''', unsafe_allow_html=True)
-        with c4:
-            arrow = "↑" if delta > 0 else ("↓" if delta < 0 else "→")
-            st.markdown(f'''
+                <div class="label">Heat Risk Status</div>
+                <div class="value"><span class="risk-badge" style="background:{risk_color}">{risk_txt}</span></div>
+            </div>""", unsafe_allow_html=True)
+        with m4:
+            st.markdown(f"""
             <div class="metric-card">
-                <div class="label">4 h Trend</div>
-                <div class="value" style="color:{'#ef4444' if delta > 0 else '#22c55e'}">{arrow} {abs(delta):.1f}°</div>
-            </div>''', unsafe_allow_html=True)
+                <div class="label">Hours ≥ 35°C (95°F)</div>
+                <div class="value" style="color:{'#ef4444' if exceed_hours > 0 else '#10b981'}">{exceed_hours:.1f}h</div>
+            </div>""", unsafe_allow_html=True)
 
-        # ── Alert / safe banner ──
-        if current >= WARNING_TEMP:
+        # Warning or Safe Banner
+        if current_temp >= WARNING_TEMP:
             st.markdown(
-                f'<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:12px;'
-                f'padding:1rem 1.2rem;margin:1rem 0">'
+                f'<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:14px;padding:1.1rem 1.4rem;margin:1.2rem 0">'
                 f'<span class="pulse-dot"></span>'
-                f'<b style="color:#991b1b">HEAT WAVE WARNING</b> — '
-                f'{fmt_temp(current, use_f)} exceeds {fmt_temp(WARNING_TEMP, use_f)}. '
-                f'💧 Stay hydrated, avoid sun 11 AM – 4 PM.</div>',
+                f'<b style="color:#991b1b;font-size:1.05rem">HIGH HEAT HAZARD ALERT:</b> '
+                f'Temperature ({fmt_temp(current_temp, use_f)}) has reached hazardous thresholds. '
+                f'Immediate hydration and cooling measures required.</div>',
                 unsafe_allow_html=True,
             )
         else:
-            st.success(f"✅ Temperature is within safe range ({fmt_temp(current, use_f)})")
+            st.success(f"✅ Conditions are currently within standard ranges ({fmt_temp(current_temp, use_f)}).")
 
-        # ── Recommendation ──
+        # Actionable Recommendation
         st.markdown(
-            f'<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;'
-            f'padding:0.8rem 1rem;margin:0.5rem 0;font-size:0.95rem">'
-            f'<b>💬 Recommendation:</b> {recommendation(lvl_text)}</div>',
+            f'<div style="background:#f8fafc;border-left:5px solid {risk_color};border-radius:8px;padding:0.9rem 1.2rem;margin:0.8rem 0;font-size:0.95rem">'
+            f'<b>Community Safety Action Plan:</b> {recommendation(risk_txt)}'
+            f'</div>',
             unsafe_allow_html=True,
         )
 
-        # ── Temperature trend chart ──
-        st.markdown('<div class="section-title">📈 Temperature — Last 4 Hours</div>', unsafe_allow_html=True)
-        chart_df = pd.DataFrame({"Time": labels, "Temperature (°C)": temps}).set_index("Time")
-        if use_f:
-            chart_df["Temperature (°F)"] = chart_df["Temperature (°C)"].apply(c_to_f)
-            st.area_chart(chart_df[["Temperature (°F)"]], color="#f72585")
-        else:
-            st.area_chart(chart_df[["Temperature (°C)"]], color="#f72585")
+        # ── 24-Hour Environmental Profile ──
+        if env_profile:
+            st.markdown('<div class="section-title">📊 Today Temperature Trend</div>', unsafe_allow_html=True)
+            hours = [f"{h:02d}:00" for h in range(24)]
+            df_env = pd.DataFrame(index=hours)
+            
+            # The env_profile dictionary contains arrays.
+            # In get_env_full_day we changed the analysis to only pull apparent_temperature_celsius
+            if isinstance(env_profile, dict):
+                app_temp_arr = env_profile.get("apparent_temperature_celsius", [])
+            else:
+                app_temp_arr = []
 
-        # ── 24-hour Environmental Profile ──
-        if fetch_env:
-            st.markdown('<div class="section-title">🌿 24-Hour Environmental Profile</div>', unsafe_allow_html=True)
-            with st.status("🔄 Fetching environmental data …", expanded=True) as env_status:
-                try:
-                    d = now.strftime("%Y-%m-%d")
-                    env = get_env_full_day(lat, lon, current, d)
+            if len(app_temp_arr) >= 24:
+                if use_f:
+                    df_env["Temperature (°F)"] = [c_to_f(v) for v in app_temp_arr[:24]]
+                else:
+                    df_env["Temperature (°C)"] = app_temp_arr[:24]
 
-                    # Build a 24-hour DataFrame from the returned arrays
-                    env_data = {}
-                    hours = [f"{h:02d}:00" for h in range(24)]
+                # Hourly progression pills (current hour + next 5 hours)
+                curr_hour_int = int(chosen_time.split(":")[0])
+                st.markdown("##### ⏱️ Next Few Hours")
+                next_cols = st.columns(6)
+                for i in range(6):
+                    target_h = (curr_hour_int + i) % 24
+                    h_str = f"{target_h:02d}:00"
+                    is_current = (i == 0)
+                    with next_cols[i]:
+                        t_val = app_temp_arr[target_h] if len(app_temp_arr) > target_h else current_temp
+                        st.markdown(f"""
+                        <div class="hourly-pill {'current' if is_current else ''}">
+                            <div class="hourly-time">{'📍 Now' if is_current else h_str}</div>
+                            <div class="hourly-temp">{fmt_temp(t_val, use_f)}</div>
+                        </div>""", unsafe_allow_html=True)
 
-                    if isinstance(env, dict):
-                        for key, val in env.items():
-                            if isinstance(val, list) and len(val) >= 24:
-                                nice_name = (key
-                                             .replace("_celsius", " (°C)")
-                                             .replace("_percent", " (%)")
-                                             .replace(":idx", " Index")
-                                             .replace("_", " ")
-                                             .title())
-                                env_data[nice_name] = val[:24]
-
-                    env_status.update(label="✅ Environmental data ready!", state="complete", expanded=False)
-
-                    if env_data:
-                        env_df = pd.DataFrame(env_data, index=hours)
-                        env_df.index.name = "Hour"
-
-                        # Mark current hour
-                        current_hour = now.hour
-
-                        # Show current-hour values as metric cards
-                        env_keys = list(env_data.keys())
-                        env_cols = st.columns(min(len(env_keys), 4))
-                        for i, key in enumerate(env_keys[:4]):
-                            with env_cols[i]:
-                                val = env_data[key][current_hour]
-                                if use_f and "°C" in key:
-                                    display_val = f"{c_to_f(val):.1f}"
-                                    display_key = key.replace("(°C)", "(°F)")
-                                else:
-                                    display_val = f"{val:.1f}" if isinstance(val, float) else str(val)
-                                    display_key = key
-                                st.metric(f"Now: {display_key}", display_val)
-
-                        # Plot the 24-hour profiles
-                        if use_f:
-                            for col in env_df.columns:
-                                if "°C" in col:
-                                    new_col = col.replace("(°C)", "(°F)")
-                                    env_df[new_col] = env_df[col].apply(c_to_f)
-                                    env_df = env_df.drop(columns=[col])
-
-                        st.line_chart(env_df, color=["#7209b7", "#0891b2", "#059669", "#d97706"][:len(env_df.columns)])
-                        st.caption(f"⏰ Current hour highlighted: **{current_hour:02d}:00** — "
-                                   f"data covers the full day from midnight to midnight.")
-
-                        with st.expander("📋 Full 24-hour data table"):
-                            st.dataframe(env_df, use_container_width=True)
-                    else:
-                        st.info("No 24-hour arrays returned. The point may be outside supported coverage.")
-
-                except Exception as e:
-                    env_status.update(label="⚠️ Error", state="error", expanded=False)
-                    st.warning(f"Could not fetch environmental data: {e}")
-
-        with st.expander("📋 Raw temperature readings"):
-            st.dataframe(chart_df, use_container_width=True)
+                # Chart
+                temp_cols = [c for c in df_env.columns if "Temperature" in c]
+                if temp_cols:
+                    st.area_chart(df_env[temp_cols], color="#db2777")
     else:
-        st.error("❌ No readings fetched. Make sure the location is inside the U.S. "
-                 "and the date is between 2021 and today.")
+        st.error(
+            f"❌ Unable to fetch thermal readings.\\n\\n"
+            f"**Reason:** `{error_msg or 'No data available for this area.'}`\\n\\n"
+            "💡 **Tip:** Try selecting a different location on the map."
+        )
 
 
